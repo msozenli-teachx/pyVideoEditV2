@@ -11,12 +11,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QSlider, QStackedLayout
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor
 
 # QMediaPlayer for real video playback
 try:
-    from PyQt6.QtMultimedia import QMediaPlayer
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
     from PyQt6.QtMultimediaWidgets import QVideoWidget
     HAS_QT_MULTIMEDIA = True
 except ImportError:
@@ -128,13 +128,45 @@ class PreviewAreaWidget(QWidget):
         
         layout.addLayout(scrubber_layout)
         
-        # Transport controls
-        transport_layout = QHBoxLayout()
-        transport_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        transport_layout.setSpacing(12)
+        # Transport controls container (ensures visibility)
+        self.controls_container = QFrame()
+        self.controls_container.setObjectName("ControlsContainer")
+        controls_layout = QHBoxLayout(self.controls_container)
+        controls_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        controls_layout.setSpacing(12)
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Stop button
+        self.stop_btn = QPushButton("⏹")
+        self.stop_btn.setObjectName("TransportButton")
+        self.stop_btn.setToolTip("Stop")
+        self.stop_btn.clicked.connect(self._on_stop)
+        
+        # Previous frame button (placeholder)
+        self.prev_frame_btn = QPushButton("⏮")
+        self.prev_frame_btn.setObjectName("TransportButton")
+        self.prev_frame_btn.setToolTip("Previous Frame")
+        
+        # Play/Pause button
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setObjectName("TransportButton")
+        self.play_btn.setToolTip("Play")
+        self.play_btn.clicked.connect(self._on_play_pause)
+        
+        # Next frame button (placeholder)
+        self.next_frame_btn = QPushButton("⏭")
+        self.next_frame_btn.setObjectName("TransportButton")
+        self.next_frame_btn.setToolTip("Next Frame")
+        
+        controls_layout.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.prev_frame_btn)
+        controls_layout.addWidget(self.play_btn)
+        controls_layout.addWidget(self.next_frame_btn)
+        
+        layout.addWidget(self.controls_container)
     
     def _setup_media_player(self):
-        """Initialize QMediaPlayer for real video playback."""
+        """Initialize QMediaPlayer for real video playback with audio."""
         if not HAS_QT_MULTIMEDIA:
             # PyQt6 multimedia not available - fallback to placeholder only
             return
@@ -142,9 +174,15 @@ class PreviewAreaWidget(QWidget):
         # Create media player
         self._media_player = QMediaPlayer(self)
         
+        # Create audio output for sound
+        self._audio_output = QAudioOutput(self)
+        self._audio_output.setVolume(1.0)  # Full volume
+        self._media_player.setAudioOutput(self._audio_output)
+        
         # Create video widget and add to stacked layout
         self._video_widget = QVideoWidget()
         self._video_widget.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self._video_widget.setStyleSheet("background-color: black;")
         self._stacked_layout.insertWidget(1, self._video_widget)  # Index 1 = above placeholder
         
         # Set video output
@@ -158,6 +196,11 @@ class PreviewAreaWidget(QWidget):
         
         # When video loaded, show video widget instead of placeholder
         self._media_player.mediaStatusChanged.connect(self._update_display_mode)
+        
+        # Setup timer for smooth scrubber updates
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._on_timer_update)
+        self._update_timer.start(50)  # Update every 50ms
     
     def _on_media_position_changed(self, position_ms: int):
         """QMediaPlayer position changed → emit position_changed signal."""
@@ -196,14 +239,16 @@ class PreviewAreaWidget(QWidget):
             self.play_btn.setToolTip("Play")
     
     def _on_media_status_changed(self, status):
-        """Handle media loading status."""
+        """Handle media loading status - auto-play when loaded."""
         from PyQt6.QtMultimedia import QMediaPlayer
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
-            # Video loaded, set duration
+            # Video loaded, set duration and auto-play
             duration_ms = self._media_player.duration()
             if duration_ms > 0:
                 self._duration = duration_ms / 1000.0
                 self.duration_changed.emit(self._duration)
+            # Auto-play with audio
+            self._media_player.play()
     
     def _update_display_mode(self, status):
         """Switch between placeholder and video widget based on media status."""
@@ -211,37 +256,25 @@ class PreviewAreaWidget(QWidget):
         if status == QMediaPlayer.MediaStatus.LoadedMedia and self._video_widget:
             # Show video widget (index 1 in stacked layout)
             self._stacked_layout.setCurrentIndex(1)
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            # Loop video when it ends
+            self._media_player.setPosition(0)
+            self._media_player.play()
         else:
             # Show placeholder (index 0)
             self._stacked_layout.setCurrentIndex(0)
-        
-        # Stop button
-        self.stop_btn = QPushButton("⏹")
-        self.stop_btn.setObjectName("TransportButton")
-        self.stop_btn.setToolTip("Stop")
-        self.stop_btn.clicked.connect(self._on_stop)
-        
-        # Play/Pause button
-        self.play_btn = QPushButton("▶")
-        self.play_btn.setObjectName("TransportButton")
-        self.play_btn.setToolTip("Play")
-        self.play_btn.clicked.connect(self._on_play_pause)
-        
-        # Frame buttons (future)
-        self.prev_frame_btn = QPushButton("◀")
-        self.prev_frame_btn.setObjectName("TransportButton")
-        self.prev_frame_btn.setToolTip("Previous Frame")
-        
-        self.next_frame_btn = QPushButton("▶")
-        self.next_frame_btn.setObjectName("TransportButton")
-        self.next_frame_btn.setToolTip("Next Frame")
-        
-        transport_layout.addWidget(self.stop_btn)
-        transport_layout.addWidget(self.prev_frame_btn)
-        transport_layout.addWidget(self.play_btn)
-        transport_layout.addWidget(self.next_frame_btn)
-        
-        layout.addLayout(transport_layout)
+    
+    def _on_timer_update(self):
+        """Timer-based update for smooth scrubber movement."""
+        if self._media_player and self._is_playing:
+            position_ms = self._media_player.position()
+            time_sec = position_ms / 1000.0
+            # Update scrubber without triggering seek
+            if self._duration > 0:
+                frac = time_sec / self._duration
+                self.scrubber.blockSignals(True)
+                self.scrubber.setValue(int(frac * 1000))
+                self.scrubber.blockSignals(False)
     
     def _apply_styles(self):
         """Apply inline styles."""
@@ -271,18 +304,26 @@ class PreviewAreaWidget(QWidget):
                 font-family: "Consolas", monospace;
                 font-size: 12px;
             }
+            #ControlsContainer {
+                background-color: #1e1e22;
+                border-top: 1px solid #2d2d32;
+                border-radius: 0 0 6px 6px;
+            }
             #TransportButton {
                 background-color: #2d2d32;
-                border: 1px solid #3a3a3f;
+                border: 1px solid #4a6fa5;
                 border-radius: 20px;
                 font-size: 16px;
                 color: #e0e0e0;
-                min-width: 40px;
-                min-height: 40px;
+                min-width: 44px;
+                min-height: 44px;
             }
             #TransportButton:hover {
-                background-color: #3a3a3f;
-                border-color: #4a4a4f;
+                background-color: #4a6fa5;
+                border-color: #5a7fb5;
+            }
+            #TransportButton:pressed {
+                background-color: #3a5f95;
             }
         """)
     
@@ -325,10 +366,23 @@ class PreviewAreaWidget(QWidget):
         position = value / 1000.0  # Normalize to 0-1
         self.seek_requested.emit(position)
         
-        # Also seek QMediaPlayer directly
+        # Also seek QMediaPlayer directly with proper audio sync
         if self._media_player and HAS_QT_MULTIMEDIA and self._duration > 0:
             seek_ms = int(position * self._duration * 1000)
+            was_playing = self._is_playing
+            # Brief pause during seek for smoother scrubbing
+            if was_playing:
+                self._media_player.pause()
             self._media_player.setPosition(seek_ms)
+            # Update timecode immediately
+            time_sec = seek_ms / 1000.0
+            current_str = self._format_time(time_sec)
+            total_str = self._format_time(self._duration)
+            self.timecode_label.setText(f"{current_str} / {total_str}")
+            self.position_changed.emit(time_sec)
+            # Resume if was playing
+            if was_playing:
+                self._media_player.play()
     
     def update_timecode(self, current: str, total: str):
         """Update timecode display."""
@@ -379,7 +433,7 @@ class PreviewAreaWidget(QWidget):
     
     def load_video(self, path: str):
         """
-        Load a video file for preview.
+        Load a video file for preview with auto-play.
         
         Args:
             path: Path to the video file
@@ -390,14 +444,20 @@ class PreviewAreaWidget(QWidget):
             # Load into QMediaPlayer
             url = QUrl.fromLocalFile(str(path))
             self._media_player.setSource(url)
-            # Note: duration_changed signal will fire when loaded
+            
+            # Show video widget immediately and raise to top
+            if self._video_widget:
+                self._stacked_layout.setCurrentIndex(1)
+                self._video_widget.raise_()
+            
+            # Note: duration_changed signal will fire when loaded, and auto-play will trigger
         else:
             # No multimedia support - just store path, use placeholder
             self._duration = 30.0  # Placeholder
             self.duration_changed.emit(self._duration)
             self.set_duration(30.0)
-        
-        self.status_bar_message(f"Loaded: {Path(path).name}" if hasattr(self, 'status_bar_message') else "")
+            # Show placeholder
+            self._stacked_layout.setCurrentIndex(0)
     
     def play(self):
         """Start playback - public API."""

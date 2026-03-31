@@ -26,6 +26,12 @@ from .widgets import (
     PreviewAreaWidget,
     TimelineWidget,
     ControlsPanelWidget,
+    PresetsPanelWidget,
+    MetadataPanelWidget,
+)
+from .dialogs import (
+    ConcatDialog,
+    AudioExtractDialog,
 )
 
 __all__ = [
@@ -34,4 +40,8 @@ __all__ = [
     'PreviewAreaWidget',
     'TimelineWidget',
     'ControlsPanelWidget',
+    'PresetsPanelWidget',
+    'MetadataPanelWidget',
+    'ConcatDialog',
+    'AudioExtractDialog',
 ]

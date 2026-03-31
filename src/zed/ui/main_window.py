@@ -3,35 +3,16 @@ Main Window
 
 The primary application window for Zed Video Editor.
 Integrates all UI components with a dark theme dashboard layout.
-
-Layout Structure (following Composite pattern for extensibility):
-    ┌─────────────────────────────────────────────────────────┐
-    │  Menu Bar                                               │
-    ├───────────────┬───────────────────────┬─────────────────┤
-    │               │                       │                 │
-    │   Media       │      Preview          │   Properties    │
-    │   Pool        │      Area             │   (Future)      │
-    │   (Left)      │      (Center)         │   (Right)       │
-    │               │                       │                 │
-    ├───────────────┴───────────────────────┴─────────────────┤
-    │                                                         │
-    │         Multi-Track Timeline (Bottom)                   │
-    │                                                         │
-    ├─────────────────────────────────────────────────────────┤
-    │  [Start: ___] [End: ___]              [▶ Process]      │
-    └─────────────────────────────────────────────────────────┘
-
-UI Layer is separated from backend:
-- All backend calls go through signals
-- No direct FFmpeg/TaskManager calls here
-- Future: Connect signals to backend controllers
 """
 
 import os
+import platform
+import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QMenuBar, QMenu, QStatusBar, QLabel, QFileDialog, QMessageBox
+    QMenuBar, QMenu, QStatusBar, QLabel, QFileDialog, QMessageBox,
+    QTabWidget
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QAction, QFont
@@ -39,48 +20,37 @@ from PyQt6.QtGui import QAction, QFont
 from .widgets import (
     MediaPoolWidget,
     PreviewAreaWidget,
-    TimelineWidget,
     ControlsPanelWidget,
+    PresetsPanelWidget,
+    MetadataPanelWidget,
+    EnhancedTimelineWidget,
 )
+from .dialogs import ConcatDialog, AudioExtractDialog
 from .controllers import PlaybackController
 
-# Backend imports (UI remains separate, only called here for actions)
-from zed.ffmpeg import FFmpegEngine, ProcessResult
+from zed.ffmpeg import FFmpegEngine, ProcessResult, get_preset
 from zed.config import get_config
 
 
 class MainWindow(QMainWindow):
     """
     Main Application Window for Zed Video Editor.
-    
-    Features:
-    - Dark theme dashboard
-    - Three-panel main area (Media Pool | Preview | Properties)
-    - Multi-track timeline at bottom
-    - Controls panel with time inputs and process button
-    - Menu bar and status bar
-    - UI separated from backend logic (signals only)
-    
-    Signals from child widgets can be connected to backend controllers:
-    - media_pool.import_requested → backend file dialog
-    - preview.play_requested → backend playback
-    - timeline.position_changed → backend seek
-    - controls.process_requested → backend video processing
     """
     
     def __init__(self):
         super().__init__()
         
         self.setWindowTitle("Zed Video Editor")
-        self.setGeometry(100, 100, 1400, 900)
-        self.setMinimumSize(1200, 700)
+        self.setGeometry(100, 100, 1600, 1000)
+        self.setMinimumSize(1400, 800)
         
-        # Backend (created lazily, only when needed for processing)
-        self._ffmpeg_engine: FFmpegEngine = None
-        self._current_video_path: str = None
+        # Backend
+        self._ffmpeg_engine = None
+        self._current_video_path = None
+        self._current_metadata = None
         
-        # Playback synchronization controller
-        self._playback_controller: PlaybackController = None
+        # Playback controller
+        self._playback_controller = None
         
         self._setup_ui()
         self._apply_styles()
@@ -110,54 +80,60 @@ class MainWindow(QMainWindow):
         self.media_pool.setMinimumWidth(200)
         self.media_pool.setMaximumWidth(350)
         
-        # Center: Preview Area (expands)
+        # Center: Preview Area
         self.preview = PreviewAreaWidget()
         self.preview.setObjectName("PreviewPanel")
         
-        # Right: Properties Panel (placeholder for future)
-        self.properties_panel = QWidget()
-        self.properties_panel.setObjectName("PropertiesPanel")
-        self.properties_panel.setMinimumWidth(180)
-        self.properties_panel.setMaximumWidth(280)
+        # Right: Tabbed panel
+        self.right_panel = QTabWidget()
+        self.right_panel.setObjectName("RightPanel")
+        self.right_panel.setMinimumWidth(250)
+        self.right_panel.setMaximumWidth(350)
         
-        props_layout = QVBoxLayout(self.properties_panel)
-        props_layout.setContentsMargins(8, 8, 8, 8)
+        # Properties tab
+        self.properties_tab = QWidget()
+        self.properties_tab.setObjectName("PropertiesTab")
+        props_layout = QVBoxLayout(self.properties_tab)
+        props_layout.setContentsMargins(12, 12, 12, 12)
         
-        props_title = QLabel("Properties")
-        props_title.setObjectName("PanelTitle")
-        props_title_font = QFont()
-        props_title_font.setBold(True)
-        props_title_font.setPointSize(12)
-        props_title.setFont(props_title_font)
-        
-        props_hint = QLabel("Select a clip or effect\non the timeline to edit")
+        props_hint = QLabel("Select a clip on the timeline\nto edit properties")
         props_hint.setObjectName("HintLabel")
         props_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        props_hint.setWordWrap(True)
-        
-        props_layout.addWidget(props_title)
         props_layout.addWidget(props_hint)
         props_layout.addStretch()
+        
+        # Presets tab
+        self.presets_panel = PresetsPanelWidget()
+        self.presets_panel.setObjectName("PresetsPanel")
+        
+        # Metadata tab
+        self.metadata_panel = MetadataPanelWidget()
+        self.metadata_panel.setObjectName("MetadataPanel")
+        
+        # Add tabs
+        self.right_panel.addTab(self.properties_tab, "Properties")
+        self.right_panel.addTab(self.presets_panel, "Export Presets")
+        self.right_panel.addTab(self.metadata_panel, "Media Info")
         
         # Add to main splitter
         main_splitter.addWidget(self.media_pool)
         main_splitter.addWidget(self.preview)
-        main_splitter.addWidget(self.properties_panel)
+        main_splitter.addWidget(self.right_panel)
         
-        # Set splitter sizes (left | center | right)
-        main_splitter.setSizes([220, 800, 200])
+        # Set splitter sizes
+        main_splitter.setSizes([250, 900, 300])
         
         main_layout.addWidget(main_splitter, stretch=1)
         
-        # Bottom: Timeline
-        self.timeline = TimelineWidget()
+        # Enhanced Timeline
+        self.timeline = EnhancedTimelineWidget()
         self.timeline.setObjectName("TimelinePanel")
-        self.timeline.setMinimumHeight(200)
-        self.timeline.setMaximumHeight(300)
+        self.timeline.setMinimumHeight(250)
+        self.timeline.setMaximumHeight(350)
         
         main_layout.addWidget(self.timeline)
         
-        # Bottom: Controls Panel
+        # Controls Panel
         self.controls = ControlsPanelWidget()
         self.controls.setObjectName("ControlsPanel")
         self.controls.setFixedHeight(60)
@@ -177,7 +153,6 @@ class MainWindow(QMainWindow):
     
     def _apply_styles(self):
         """Apply dark theme QSS stylesheet."""
-        # Load external QSS file
         qss_path = os.path.join(os.path.dirname(__file__), "styles", "dark_theme.qss")
         
         try:
@@ -185,28 +160,14 @@ class MainWindow(QMainWindow):
                 qss = f.read()
             self.setStyleSheet(qss)
         except FileNotFoundError:
-            # Fallback inline styles if QSS not found
             self.setStyleSheet("""
                 QMainWindow, QWidget {
                     background-color: #1a1a1e;
                     color: #e0e0e0;
                     font-family: "Segoe UI", sans-serif;
                 }
-                #PanelTitle {
-                    color: #e0e0e0;
-                    font-weight: bold;
-                }
-                #HintLabel {
-                    color: #6a6a6a;
-                    font-size: 11px;
-                }
-                #StatusBar {
-                    background-color: #222226;
-                    color: #a0a0a0;
-                }
             """)
         
-        # Additional inline adjustments
         self.setStyleSheet(self.styleSheet() + """
             #CentralWidget {
                 background-color: #1a1a1e;
@@ -215,8 +176,31 @@ class MainWindow(QMainWindow):
                 background-color: #2d2d32;
                 width: 2px;
             }
-            #MediaPoolPanel, #PreviewPanel, #PropertiesPanel, #TimelinePanel {
+            #MediaPoolPanel, #PreviewPanel {
                 background-color: #1a1a1e;
+            }
+            #RightPanel {
+                background-color: #1a1a1e;
+            }
+            #RightPanel::pane {
+                border: none;
+                background-color: #1a1a1e;
+            }
+            #RightPanel QTabBar::tab {
+                background-color: #222226;
+                color: #a0a0a0;
+                padding: 8px 16px;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            #RightPanel QTabBar::tab:selected {
+                background-color: #1a1a1e;
+                color: #e0e0e0;
+                border-bottom: 2px solid #4a6fa5;
+            }
+            #RightPanel QTabBar::tab:hover:!selected {
+                background-color: #2d2d32;
+                color: #e0e0e0;
             }
             #VersionLabel {
                 color: #6a6a6a;
@@ -235,13 +219,29 @@ class MainWindow(QMainWindow):
         
         import_action = QAction("Import Media...", self)
         import_action.setShortcut("Ctrl+I")
-        import_action.triggered.connect(self.media_pool.import_requested)
+        import_action.triggered.connect(self._on_import_requested)
         file_menu.addAction(import_action)
         
         file_menu.addSeparator()
         
-        export_action = QAction("Export...", self)
+        # Export with preset submenu
+        export_preset_menu = file_menu.addMenu("Export with Preset")
+        
+        presets = [
+            ("YouTube 1080p", "youtube_1080p"),
+            ("YouTube 4K", "youtube_4k"),
+            ("High Quality", "high_quality"),
+            ("Balanced", "balanced"),
+            ("Web Optimized", "web_optimized"),
+        ]
+        for display_name, preset_name in presets:
+            action = QAction(display_name, self)
+            action.triggered.connect(lambda checked, p=preset_name: self._export_with_preset(p))
+            export_preset_menu.addAction(action)
+        
+        export_action = QAction("Export Custom...", self)
         export_action.setShortcut("Ctrl+E")
+        export_action.triggered.connect(self._on_export_custom)
         file_menu.addAction(export_action)
         
         file_menu.addSeparator()
@@ -253,71 +253,87 @@ class MainWindow(QMainWindow):
         
         # Edit menu
         edit_menu = menubar.addMenu("Edit")
-        edit_menu.addAction("Undo", lambda: None)
-        edit_menu.addAction("Redo", lambda: None)
+        
+        concat_action = QAction("Concatenate Videos...", self)
+        concat_action.triggered.connect(self._on_concatenate)
+        edit_menu.addAction(concat_action)
+        
         edit_menu.addSeparator()
-        edit_menu.addAction("Cut", lambda: None)
-        edit_menu.addAction("Copy", lambda: None)
-        edit_menu.addAction("Paste", lambda: None)
+        
+        extract_audio_action = QAction("Extract Audio...", self)
+        extract_audio_action.triggered.connect(self._on_extract_audio)
+        edit_menu.addAction(extract_audio_action)
         
         # View menu
         view_menu = menubar.addMenu("View")
-        view_menu.addAction("Toggle Media Pool", lambda: None)
-        view_menu.addAction("Toggle Timeline", lambda: None)
-        view_menu.addAction("Toggle Properties", lambda: None)
+        
+        show_media_pool = QAction("Media Pool", self)
+        show_media_pool.triggered.connect(lambda: self.media_pool.setVisible(True))
+        view_menu.addAction(show_media_pool)
+        
+        show_timeline = QAction("Timeline", self)
+        show_timeline.triggered.connect(lambda: self.timeline.setVisible(True))
+        view_menu.addAction(show_timeline)
+        
+        show_presets = QAction("Export Presets", self)
+        show_presets.triggered.connect(lambda: self.right_panel.setCurrentWidget(self.presets_panel))
+        view_menu.addAction(show_presets)
+        
+        show_metadata = QAction("Media Info", self)
+        show_metadata.triggered.connect(lambda: self.right_panel.setCurrentWidget(self.metadata_panel))
+        view_menu.addAction(show_metadata)
         
         # Help menu
         help_menu = menubar.addMenu("Help")
-        help_menu.addAction("About Zed", lambda: None)
+        help_menu.addAction("About Zed", self._on_about)
     
     def _connect_signals(self):
         """Connect internal widget signals."""
-        # Controls: update duration when start/end changes
+        # Controls
         self.controls.start_changed.connect(self.controls.on_start_changed)
         self.controls.end_changed.connect(self.controls.on_end_changed)
-        
-        # Example: Connect process to status update (backend would do real work)
         self.controls.process_requested.connect(self._on_process_requested)
         
-        # Media pool import
-        self.media_pool.import_requested.connect(self._on_import_requested)
+        # Media pool
         self.media_pool.media_selected.connect(self._on_media_selected)
+        self.media_pool.files_dropped.connect(self._on_files_dropped)
+        
+        # Presets panel
+        self.presets_panel.export_requested.connect(self._on_preset_export)
+        
+        # Timeline
+        self.timeline.clip_trimmed.connect(self._on_timeline_clip_trimmed)
+        self.timeline.position_changed.connect(self._on_timeline_position_changed)
+        self.timeline.clip_dropped.connect(self._on_timeline_clip_dropped)
+        
+        # Sync timeline play/pause with preview
+        self.timeline.play_btn.clicked.connect(self._on_timeline_play_clicked)
     
     def _wire_playback_controller(self):
-        """Create and wire the PlaybackController to all UI components."""
+        """Create and wire the PlaybackController."""
         self._playback_controller = PlaybackController()
         
-        # Controller → Preview (for state coordination)
+        # Controller -> Preview
         self._playback_controller.position_changed.connect(self.preview.on_position_update)
         self._playback_controller.playing_changed.connect(self.preview.set_playing)
         self._playback_controller.duration_changed.connect(self.preview.set_duration)
         
-        # Controller → Timeline
-        self._playback_controller.position_changed.connect(self.timeline.on_position_update)
+        # Controller -> Timeline
+        self._playback_controller.position_changed.connect(
+            lambda pos: self.timeline.set_position(pos)
+        )
         self._playback_controller.duration_changed.connect(self.timeline.set_duration)
         
-        # Preview → Controller (transport controls)
+        # Preview -> Controller
         self.preview.play_requested.connect(self._playback_controller.play)
         self.preview.pause_requested.connect(self._playback_controller.pause)
         self.preview.stop_requested.connect(self._playback_controller.stop)
         self.preview.seek_requested.connect(
             lambda frac: self._playback_controller.seek_normalized(frac)
         )
-        
-        # Preview → Timeline (direct sync from QMediaPlayer for real video)
-        self.preview.position_changed.connect(self.timeline.on_position_update)
-        self.preview.duration_changed.connect(self.timeline.set_duration)
-        
-        # Timeline → Controller (playhead/scrubbing)
-        self.timeline.position_changed.connect(
-            lambda frac: self._playback_controller.seek_normalized(frac)
-        )
-        
-        # Controls → Controller (if duration changes via process panel)
-        # (Optional: could sync controls with controller if needed)
     
     def _on_process_requested(self, start: float, end: float):
-        """Handle Process button: clip video using FFmpegEngine."""
+        """Handle Process button: clip video."""
         if not self._current_video_path:
             self.status_bar.showMessage("Please import a video first.", 3000)
             QMessageBox.warning(self, "No Video", "Please import a video before processing.")
@@ -332,14 +348,12 @@ class MainWindow(QMainWindow):
         try:
             engine = self._get_ffmpeg_engine()
             
-            # Generate output path
             input_path = Path(self._current_video_path)
             output_dir = get_config().ffmpeg.default_output_dir
             output_dir.mkdir(parents=True, exist_ok=True)
             output_file = output_dir / f"{input_path.stem}_clip{input_path.suffix}"
             
-            # Perform clipping
-            result: ProcessResult = engine.clip_video(
+            result = engine.clip_video(
                 input_file=input_path,
                 output_file=output_file,
                 start_time=start,
@@ -375,25 +389,199 @@ class MainWindow(QMainWindow):
         )
         
         if path:
+            # Add to media pool (which will also load it)
+            self.media_pool.add_media(path)
+    
+    def _on_files_dropped(self, paths: list):
+        """Handle files dropped into media pool."""
+        for path in paths:
             self._load_video_path(path)
     
     def _on_media_selected(self, path: str):
-        """Handle media pool selection - load video for preview."""
-        # Extract actual path (strip emoji prefix if present)
+        """Handle media pool selection - load without re-adding to pool."""
         if path and Path(path).exists():
-            self._load_video_path(path)
-        else:
-            # Try to find the file (demo items have emoji prefix)
-            # For demo, just use the path as-is
-            self._load_video_path(path)
+            self._load_video_without_adding(path)
     
     def _load_video_path(self, path: str):
-        """Common handler to load a video path."""
+        """Common handler to load a video path and add to pool."""
+        self._load_video_without_adding(path)
+        # Add to media pool (checks for duplicates)
+        self.media_pool.add_media(path)
+    
+    def _load_video_without_adding(self, path: str):
+        """Load video without adding to media pool (for existing items)."""
         self._current_video_path = path
         self.preview.load_video(path)
         self.status_bar.showMessage(f"Loaded: {Path(path).name}", 3000)
+        
+        # Inspect and display metadata
+        try:
+            from ...operations.metadata import MetadataInspector
+            inspector = MetadataInspector()
+            metadata = inspector.inspect(path)
+            self.metadata_panel.set_metadata(metadata)
+            
+            # Switch to metadata tab
+            self.right_panel.setCurrentWidget(self.metadata_panel)
+            
+            # Update timeline duration
+            if metadata.format.duration:
+                self.timeline.set_duration(metadata.format.duration)
+                self._playback_controller.set_duration(metadata.format.duration)
+                
+                # Add a clip representation to the timeline
+                self.timeline.add_clip_to_track(
+                    0,  # Video track
+                    Path(path).name,
+                    0.0,  # Start at 0
+                    metadata.format.duration
+                )
+                
+                # Add waveform to audio track
+                self.timeline.add_waveform_to_track(
+                    1,  # Audio track
+                    metadata.format.duration
+                )
+                
+        except Exception as e:
+            self.status_bar.showMessage(f"Could not read metadata: {e}", 3000)
     
-    def _get_ffmpeg_engine(self) -> FFmpegEngine:
+    def _on_timeline_clip_trimmed(self, name: str, start: float, duration: float):
+        """Handle clip trim from timeline."""
+        self.status_bar.showMessage(
+            f"Clip '{name}' trimmed: start={start:.2f}s, duration={duration:.2f}s", 
+            3000
+        )
+        
+        # Update controls to match
+        self.controls.set_time_range(start, start + duration)
+    
+    def _on_timeline_position_changed(self, position: float):
+        """Handle timeline position change - sync with preview and controller."""
+        # Update playback controller
+        self._playback_controller.seek(position)
+        # Also seek the preview directly for immediate response
+        self.preview.seek(position)
+    
+    def _on_timeline_play_clicked(self):
+        """Handle timeline play/pause button - sync with preview."""
+        if self.timeline._is_playing:
+            self.preview.play()
+        else:
+            self.preview.pause()
+    
+    def _on_timeline_clip_dropped(self, path: str, time: float, track_index: int):
+        """Handle clip dropped from media pool to timeline."""
+        from zed import ZedApp
+        
+        try:
+            # Get metadata for the dropped file
+            app = ZedApp()
+            metadata = app.inspect(path)
+            duration = metadata.format.duration if metadata.format else 10.0
+            
+            # Add clip to the specified track at the drop time
+            track_name = Path(path).name
+            self.timeline.add_clip_to_track(
+                track_index,
+                track_name,
+                time,  # Start at drop time
+                duration
+            )
+            
+            # If it's a video track (0), also add waveform to audio track
+            if track_index == 0:
+                self.timeline.add_waveform_to_track(1, duration)
+            
+            self.status_bar.showMessage(f"Added {track_name} to timeline at {time:.1f}s", 3000)
+            
+        except Exception as e:
+            self.status_bar.showMessage(f"Could not add clip: {e}", 3000)
+    
+    def _on_preset_export(self, preset_name: str):
+        """Handle export with preset."""
+        self._export_with_preset(preset_name)
+    
+    def _export_with_preset(self, preset_name: str):
+        """Export current video with selected preset."""
+        if not self._current_video_path:
+            QMessageBox.warning(self, "No Video", "Please import a video first.")
+            return
+        
+        preset = get_preset(preset_name)
+        if not preset:
+            QMessageBox.warning(self, "Error", f"Preset not found: {preset_name}")
+            return
+        
+        input_path = Path(self._current_video_path)
+        ext = preset.get_file_extension()
+        output_dir = get_config().ffmpeg.default_output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"{input_path.stem}_{preset_name}{ext}"
+        
+        self.status_bar.showMessage(f"Exporting with {preset.display_name}...", 0)
+        
+        try:
+            engine = self._get_ffmpeg_engine()
+            
+            builder = engine.create_command()
+            builder.input(input_path).output(output_file)
+            preset.apply_to_builder(builder)
+            builder.description(f"Export with {preset.display_name}")
+            
+            command = builder.build()
+            result = engine.execute(command)
+            
+            if result.success:
+                self.status_bar.showMessage(f"✓ Exported: {output_file.name}", 5000)
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    f"Video exported successfully!\n\nPreset: {preset.display_name}\nOutput: {output_file}"
+                )
+            else:
+                self.status_bar.showMessage(f"✗ Export failed", 5000)
+                QMessageBox.critical(self, "Export Failed", result.error_message)
+                
+        except Exception as e:
+            self.status_bar.showMessage(f"✗ Error: {e}", 5000)
+            QMessageBox.critical(self, "Error", str(e))
+    
+    def _on_export_custom(self):
+        """Open presets panel for custom export."""
+        self.right_panel.setCurrentWidget(self.presets_panel)
+    
+    def _on_concatenate(self):
+        """Open concatenation dialog."""
+        dialog = ConcatDialog(self, initial_file=self._current_video_path)
+        dialog.exec()
+    
+    def _on_extract_audio(self):
+        """Open audio extraction dialog."""
+        dialog = AudioExtractDialog(self, input_file=self._current_video_path)
+        dialog.exec()
+    
+    def _on_about(self):
+        """Show about dialog."""
+        QMessageBox.about(
+            self,
+            "About Zed Video Editor",
+            """<h2>Zed Video Editor v0.1.0</h2>
+            <p>A Python-based video editor built with PyQt6 and FFmpeg.</p>
+            <p>Features:</p>
+            <ul>
+                <li>Video clipping and trimming</li>
+                <li>Visual timeline with clip editing</li>
+                <li>Audio waveform display</li>
+                <li>Export presets for social media</li>
+                <li>Video concatenation</li>
+                <li>Audio extraction</li>
+                <li>Metadata inspection</li>
+            </ul>
+            """
+        )
+    
+    def _get_ffmpeg_engine(self):
         """Lazy-create the FFmpeg engine."""
         if self._ffmpeg_engine is None:
             self._ffmpeg_engine = FFmpegEngine()
@@ -402,4 +590,3 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         """Handle window resize."""
         super().resizeEvent(event)
-        # Future: Adjust layouts dynamically if needed

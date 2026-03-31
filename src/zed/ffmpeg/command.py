@@ -18,6 +18,8 @@ class VideoCodec(str, Enum):
     VP8 = 'libvpx'
     VP9 = 'libvpx-vp9'
     PRORES = 'prores_ks'
+    FLAC = 'flac'
+    PCM = 'pcm_s16le'
     COPY = 'copy'
 
 
@@ -27,7 +29,22 @@ class AudioCodec(str, Enum):
     MP3 = 'libmp3lame'
     OPUS = 'libopus'
     VORBIS = 'libvorbis'
+    FLAC = 'flac'
+    PCM = 'pcm_s16le'
     COPY = 'copy'
+
+
+class ContainerFormat(str, Enum):
+    """Common container formats."""
+    MP4 = 'mp4'
+    MKV = 'mkv'
+    MOV = 'mov'
+    AVI = 'avi'
+    WEBM = 'webm'
+    GIF = 'gif'
+    MP3 = 'mp3'
+    WAV = 'wav'
+    FLAC = 'flac'
 
 
 @dataclass

@@ -46,8 +46,15 @@ from .ffmpeg import (
     FFmpegCommandBuilder,
     VideoCodec,
     AudioCodec,
+    ContainerFormat,
     ProcessResult,
     ProcessStatus,
+    ExportPreset,
+    PresetRegistry,
+    PresetCategory,
+    get_preset_registry,
+    get_preset,
+    list_presets,
 )
 
 from .tasks import (
@@ -60,13 +67,22 @@ from .tasks import (
 
 from .operations import (
     VideoClipper,
+    VideoConcatenator,
+    AudioExtractor,
+    AudioProcessor,
+    MetadataInspector,
+    MediaMetadata,
+    VideoStreamInfo,
+    AudioStreamInfo,
+    FormatInfo,
+    inspect_media,
 )
 
 __version__ = '0.1.0'
 
 # Import for ZedApp class (must be at module level)
 import logging
-from typing import Optional
+from typing import Optional, List
 
 
 class ZedApp:
@@ -105,6 +121,9 @@ class ZedApp:
         self._task_manager: Optional[TaskManager] = None
         self._ffmpeg_engine: Optional[FFmpegEngine] = None
         self._clipper: Optional[VideoClipper] = None
+        self._concatenator: Optional[VideoConcatenator] = None
+        self._audio_extractor: Optional[AudioExtractor] = None
+        self._metadata_inspector: Optional[MetadataInspector] = None
         
         # Configure logging
         log_level = getattr(logging, self._config.logging.level.upper(), logging.INFO)
@@ -142,6 +161,29 @@ class ZedApp:
         if self._clipper is None:
             self._clipper = VideoClipper(self.ffmpeg)
         return self._clipper
+    
+    @property
+    def concatenator(self) -> VideoConcatenator:
+        """Get the video concatenator operation."""
+        if self._concatenator is None:
+            self._concatenator = VideoConcatenator(self.ffmpeg)
+        return self._concatenator
+    
+    @property
+    def audio_extractor(self) -> AudioExtractor:
+        """Get the audio extractor operation."""
+        if self._audio_extractor is None:
+            self._audio_extractor = AudioExtractor(self.ffmpeg)
+        return self._audio_extractor
+    
+    @property
+    def metadata_inspector(self) -> MetadataInspector:
+        """Get the metadata inspector."""
+        if self._metadata_inspector is None:
+            self._metadata_inspector = MetadataInspector(
+                self._config.ffmpeg.resolve_ffprobe_path()
+            )
+        return self._metadata_inspector
     
     # Convenience methods
     
@@ -199,6 +241,74 @@ class ZedApp:
         """Wait for a task to complete."""
         return self.tasks.wait(task_id, timeout=timeout)
     
+    def concat(
+        self,
+        input_files: List[str],
+        output_file: str,
+        method: str = 'demuxer',
+        **kwargs
+    ) -> 'ProcessResult':
+        """
+        Concatenate multiple video files.
+        
+        Args:
+            input_files: List of video files to concatenate
+            output_file: Output file path
+            method: 'demuxer' (fast, same format) or 'filter' (re-encode)
+            **kwargs: Additional options
+        
+        Returns:
+            ProcessResult
+        """
+        return self.concatenator.concat_files(
+            input_files, output_file, method=method, **kwargs
+        )
+    
+    def extract_audio(
+        self,
+        input_file: str,
+        output_file: str,
+        **kwargs
+    ) -> 'ProcessResult':
+        """
+        Extract audio from a video file.
+        
+        Args:
+            input_file: Input video file
+            output_file: Output audio file
+            **kwargs: Additional options (audio_codec, audio_bitrate, etc.)
+        
+        Returns:
+            ProcessResult
+        """
+        return self.audio_extractor.extract_audio(
+            input_file, output_file, **kwargs
+        )
+    
+    def inspect(self, file_path: str) -> 'MediaMetadata':
+        """
+        Inspect a media file and return comprehensive metadata.
+        
+        Args:
+            file_path: Path to media file
+        
+        Returns:
+            MediaMetadata object
+        """
+        return self.metadata_inspector.inspect(file_path)
+    
+    def quick_info(self, file_path: str) -> dict:
+        """
+        Get quick summary info about a media file.
+        
+        Args:
+            file_path: Path to media file
+        
+        Returns:
+            Dictionary with key information
+        """
+        return self.metadata_inspector.quick_info(file_path)
+    
     def get_stats(self) -> dict:
         """Get application statistics."""
         return {
@@ -239,6 +349,7 @@ __all__ = [
     'FFmpegCommandBuilder',
     'VideoCodec',
     'AudioCodec',
+    'ContainerFormat',
     'ProcessResult',
     'ProcessStatus',
     # Tasks
@@ -249,6 +360,22 @@ __all__ = [
     'TaskPriority',
     # Operations
     'VideoClipper',
+    'VideoConcatenator',
+    'AudioExtractor',
+    'AudioProcessor',
+    'MetadataInspector',
+    'MediaMetadata',
+    'VideoStreamInfo',
+    'AudioStreamInfo',
+    'FormatInfo',
+    'inspect_media',
+    # Presets
+    'ExportPreset',
+    'PresetRegistry',
+    'PresetCategory',
+    'get_preset_registry',
+    'get_preset',
+    'list_presets',
     # Application
     'ZedApp',
 ]
